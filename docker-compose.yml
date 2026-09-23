@@ -1,0 +1,84 @@
+services:
+  postgres_db:
+    image: postgres:15-alpine
+    container_name: postgres_db_sandbox
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-telegram_bot_db}
+      POSTGRES_USER: ${POSTGRES_USER:-bot_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-bot_password_segura}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./telegram-bot/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - ai_sandbox_net
+
+  ollama-isolated:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        MODEL_NAME: ${MODEL_NAME:-qwen2.5:1.5b}
+        EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nomic-embed-text}
+    container_name: ollama_sandbox
+    user: "10001:10001"
+    restart: unless-stopped
+    expose:
+      - "11434" # Solo visible para otros contenedores en la red ai_sandbox_net
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - OLLAMA_NUM_PARALLEL=1
+      - OLLAMA_MAX_LOADED_MODELS=1
+      - OLLAMA_DEBUG=1
+    volumes:
+      - ollama_isolated_data:/home/aiuser/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - ai_sandbox_net
+    deploy:
+      resources:
+        limits:
+          memory: 12g                    # Límite máximo ampliado
+        reservations:
+          memory: 6g                     # RAM reservada garantizada
+
+  telegram_bot:
+    build:
+      context: ./telegram-bot
+      dockerfile: Dockerfile.telegram
+    container_name: telegram_bot_sandbox
+    restart: unless-stopped
+    env_file:
+      - .env
+      - ./telegram-bot/.env
+    environment:
+      - OLLAMA_HOST=http://ollama_sandbox:11434
+      - CHROMA_DB_DIR=/app/chroma_db
+    volumes:
+      - ./telegram-bot/chroma_db:/app/chroma_db
+      - ./telegram-bot/docs:/app/docs  # Carpeta para colocar PDFs
+    networks:
+      - ai_sandbox_net
+    depends_on:
+      ollama-isolated:
+        condition: service_healthy
+      postgres_db:
+        condition: service_started
+
+volumes:
+  ollama_isolated_data:
+  postgres_data:
+
+networks:
+  ai_sandbox_net:
+    driver: bridge

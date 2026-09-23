@@ -1,0 +1,4 @@
+# Configuración del modelo Ollama
+MODEL_NAME=qwen2.5:1.5b
+EMBEDDING_MODEL=nomic-embed-text
+OLLAMA_HOST=http://ollama_sandbox:11434

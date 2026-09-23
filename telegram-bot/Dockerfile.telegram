@@ -1,0 +1,20 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir \
+    python-telegram-bot \
+    ollama \
+    python-dotenv \
+    psycopg2-binary \
+    langchain \
+    langchain-community \
+    langchain-chroma \
+    langchain-ollama \
+    langchain-core \
+    pypdf
+
+COPY R2D2_CloudBot.py .
+COPY ingest.py .
+
+CMD ["python", "R2D2_CloudBot.py"]
