@@ -1,0 +1,10 @@
+services:
+  ollama:
+    build: .
+    container_name: ia_simple
+    restart: unless-stopped
+    volumes:
+      - ollama_models:/root/.ollama
+
+volumes:
+  ollama_models:
