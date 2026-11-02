@@ -2,3 +2,5 @@
 MODEL_NAME=qwen2.5:1.5b
 EMBEDDING_MODEL=nomic-embed-text
 OLLAMA_HOST=http://ollama_sandbox:11434
+VISION_MODEL=moondream:latest
+TRANSLATOR_MODEL=lauchacarro/qwen2.5-translator
