@@ -1,1 +1,7 @@
+cat << 'EOF' >> .gitignore
+
+# Datos locales del RAG y entorno
 .env
+telegram-bot/chroma_db/
+telegram-bot/docs/
+EOF
