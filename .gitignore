@@ -3,3 +3,6 @@ chroma_db/
 docs/
 __pycache__/
 *.pyc
+reports/
+*.swp
+.workshop.lock
