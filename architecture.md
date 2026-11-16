@@ -21,7 +21,6 @@ Asistente conversacional y agente autónomo desplegado localmente mediante **Doc
     ├── init.sql                 # Esquema inicial de tablas en PostgreSQL (usuarios y mensajes)
     ├── ingest.py                # Script auxiliar de ingesta de documentos por consola
     ├── env                      # Plantilla de variables del bot (.env ignorado en Git)
-    ├── README.md                # Documentación específica del servicio de Telegram
     ├── docs/                    # [Local / Ignorado en Git] Documentos PDF y TXT indexados en el RAG
     ├── chroma_db/               # [Local / Ignorado en Git] Base de datos vectorial de ChromaDB
     └── reports/                 # [Local / Ignorado en Git] Reportes .txt y .csv generados por el agente
