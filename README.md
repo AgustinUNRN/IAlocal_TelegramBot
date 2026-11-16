@@ -1,18 +1,19 @@
 # 🤖 R2D2 CloudBot (Arturito) — Agente IA Local en Docker
 
-Asistente conversacional y **agente autónomo** dockerizado para Telegram, ejecutándose 100% en entorno local sin dependencias de APIs externas en la nube. Integra **Ollama** (`qwen2.5:3b` y `llava-phi3`), recuperación aumentada por generación (**RAG**) con **ChromaDB**, y persistencia relacional de usuarios e historial en **PostgreSQL**.
+Asistente conversacional y **agente autónomo multi-modelo** dockerizado para Telegram, ejecutándose 100% en entorno local sin dependencias de APIs externas en la nube. Integra **Ollama** (`qwen2.5:3b`, `qwen2.5-coder:1.5b`, `moondream:1.8b` y `lauchacarro/qwen2.5-translator`), recuperación aumentada por generación (**RAG**) con **ChromaDB** (`nomic-embed-text`), y persistencia relacional de usuarios e historial en **PostgreSQL**[cite: 6, 7, 8].
 
 ---
 
 ## 🧠 Capacidades del Agente
 
-A diferencia de un chatbot lineal, **Arturito** utiliza *Tool Calling* (`ChatOllama` + `bind_tools` en LangChain) para razonar sobre cada mensaje y decidir autónomamente qué acción ejecutar:
+A diferencia de un chatbot lineal, **Arturito** utiliza *Tool Calling* (`ChatOllama` + `bind_tools` en LangChain) para razonar sobre cada mensaje y decidir autónomamente qué herramienta o modelo especialista invocar:
 
-1. **📚 Consulta de Documentos (`buscar_en_documentos_rag`):** Busca información semántica en los archivos `.pdf` y `.txt` indexados en **ChromaDB** (`nomic-embed-text`).
-2. **🗄️ Bitácora Histórica (`buscar_historial_postgresql`):** Consulta conversaciones previas en **PostgreSQL** filtrando estrictamente por el `telegram_id` del usuario activo.
-3. **📝 Generación de Reportes (`generar_reporte_archivo`):** Crea archivos descargables (`.txt` o `.csv`) con resúmenes o datos procesados y los envía automáticamente como documento adjunto en Telegram.
-4. **🖼️ Análisis Multimodal de Imágenes:** Procesa fotografías enviadas al chat utilizando modelos de visión locales (`llava-phi3` o `moondream` con traducción automática).
-5. **📥 Ingesta Dinámica por Chat:** Permite enviar archivos `.pdf` o `.txt` directamente como documento al bot de Telegram para fragmentarlos e indexarlos al instante en el RAG.
+1. **💻 Delegación de Programación (`resolver_programacion_codigo`):** Deriva tareas de escritura de código, scripts (Python, SQL, Bash, Java, HTML, etc.), depuración o explicación técnica al modelo especialista **`qwen2.5-coder:1.5b`**[cite: 6].
+2. **📚 Consulta de Documentos (`buscar_en_documentos_rag`):** Busca información semántica en los archivos `.pdf` y `.txt` indexados en **ChromaDB** (`nomic-embed-text`).
+3. **🗄️ Bitácora Histórica (`buscar_historial_postgresql`):** Consulta conversaciones previas en **PostgreSQL** filtrando estrictamente por el `telegram_id` del usuario activo.
+4. **📝 Generación de Reportes (`generar_reporte_archivo`):** Crea archivos descargables (`.txt` o `.csv`) en `/app/reports` y los envía automáticamente como documento adjunto en Telegram[cite: 6, 7].
+5. **🖼️ Pipeline Multimodal de Imágenes:** Analiza fotografías enviadas al chat con **`moondream:1.8b`** y traduce la respuesta al español mediante **`lauchacarro/qwen2.5-translator`** (`temperature=0.0`)[cite: 6].
+6. **📥 Ingesta Dinámica por Chat:** Permite enviar archivos `.pdf` o `.txt` directamente como documento al bot de Telegram para fragmentarlos (`RecursiveCharacterTextSplitter`) e indexarlos al instante en ChromaDB[cite: 6, 7].
 
 ---
 
@@ -20,9 +21,9 @@ A diferencia de un chatbot lineal, **Arturito** utiliza *Tool Calling* (`ChatOll
 
 El entorno está orquestado con **Docker Compose** e integra tres servicios aislados en red local (`ai_sandbox_net`):
 
-* **`telegram_bot` (`telegram_bot_sandbox`):** Aplicación en Python que gestiona los handlers de Telegram, el bucle del agente LangChain, la ingesta de archivos, la generación de reportes y las conexiones con PostgreSQL y ChromaDB.
-* **`ollama-isolated` (`ollama_sandbox`):** Servidor local de Ollama que expone el modelo principal del agente (`qwen2.5:3b`), el modelo de visión (`llava-phi3`) y el modelo de embeddings (`nomic-embed-text`).
-* **`postgres_db` (`postgres_db_sandbox`):** Base de datos PostgreSQL para el registro y persistencia relacional de usuarios y mensajes.
+* **`telegram_bot` (`telegram_bot_sandbox`):** Aplicación en Python (`R2D2_CloudBot.py`) que gestiona los handlers de Telegram, el bucle del agente LangChain, la ingesta de archivos, la generación de reportes y las conexiones con PostgreSQL y ChromaDB[cite: 6, 7].
+* **`ollama-isolated` (`ollama_sandbox`):** Servidor local de Ollama que aloja los 5 modelos locales (`qwen2.5:3b`, `qwen2.5-coder:1.5b`, `moondream:1.8b`, `lauchacarro/qwen2.5-translator` y `nomic-embed-text`)[cite: 6, 7, 8].
+* **`postgres_db` (`postgres_db_sandbox`):** Base de datos PostgreSQL para el registro y persistencia relacional de usuarios y mensajes[cite: 6, 7].
 
 *(Para ver el árbol de directorios completo, consultá [`architecture.md`](./architecture.md)).*
 
@@ -37,18 +38,19 @@ El entorno está orquestado con **Docker Compose** e integra tres servicios aisl
 
 ## ⚙️ Configuración del Entorno
 
-El proyecto divide la configuración entre la raíz (`env`) y la subcarpeta del bot (`telegram-bot/env`). Podés copiar las plantillas incluidas o crear los archivos `.env` manualmente:
+El proyecto divide las variables de entorno en dos archivos `.env` (ambos ignorados en Git; se incluyen las plantillas `env` como referencia):
 
-### 1. Variables Globales (Raíz)
-Crear `.env` en la raíz del proyecto:
+### 1. Variables de Modelos e Inferencia (`.env` en la raíz)
+Crear `.env` en la raíz del proyecto para configurar Ollama y los modelos utilizados por los contenedores[cite: 7, 8]:
 
 ```env
-# Configuración del modelo Ollama
+# Configuración de modelos Ollama
 MODEL_NAME=qwen2.5:3b
 EMBEDDING_MODEL=nomic-embed-text
 OLLAMA_HOST=http://ollama_sandbox:11434
 VISION_MODEL=moondream:1.8b
 TRANSLATOR_MODEL=lauchacarro/qwen2.5-translator
+CODER_MODEL=qwen2.5-coder:1.5b
 ```
 ### 2 Variables del Bot (telegram-bot/)
 1. Ubicarse en el directorio principal e ingresar a la carpeta del bot:
@@ -92,6 +94,7 @@ Nota: La descarga de los modelos ocurre de forma automática durante la etapa de
 Si los modelos no están descargados internamente, ejecutá:
 ```Bash
 docker exec -it ollama_sandbox ollama pull qwen2.5:3b
+docker exec -it ollama_sandbox ollama pull qwen2.5-coder:1.5b
 docker exec -it ollama_sandbox ollama pull nomic-embed-text
 docker exec -it ollama_sandbox ollama pull moondream:1.8b
 docker exec -it ollama_sandbox ollama pull lauchacarro/qwen2.5-translator
@@ -99,7 +102,7 @@ docker exec -it ollama_sandbox ollama pull lauchacarro/qwen2.5-translator
 
 ## 📄 Ingesta de Documentos (Modo RAG)
 
-Existen dos formas de cargar documentos .pdf o .txt en la base vectori
+Existen dos formas de cargar documentos .pdf o .txt en la base vectorial ChromaDB
 
 - Directamente desde Telegram (Recomendado): Adjuntá y enviá cualquier archivo .pdf o .txt al chat del bot. Arturito lo guardará en telegram-bot/docs/, lo fragmentará e indexará automáticamente en ChromaDB.
 
