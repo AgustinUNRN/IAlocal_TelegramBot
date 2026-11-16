@@ -73,7 +73,7 @@ def registrar_interaccion_db(user_id, username, first_name, user_message, bot_re
         print(f"⚠️ Error al guardar en PostgreSQL: {e}")
 
 
-def obtener_historial_usuario(user_id, limit=3):
+def obtener_historial_usuario(user_id, limit=2):
     try:
         conn = get_db_connection()
         cur = conn.cursor()
@@ -103,26 +103,24 @@ embeddings = OllamaEmbeddings(model=EMBEDDING_MODEL, base_url=OLLAMA_HOST)
 vectorstore = Chroma(persist_directory=DB_DIR, embedding_function=embeddings)
 
 if ENABLE_RAG:
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 2})
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
 
     def format_docs(docs):
         return "\n\n".join(doc.page_content for doc in docs)
 
     prompt_tutor = ChatPromptTemplate.from_template(
-        "Historial reciente de la conversación:\n{history}\n\n"
-        "Responde a la pregunta basándote EXCLUSIVAMENTE en el siguiente contexto oficial.\n"
-        "Si la respuesta no está en el contexto, indica que no la tienes y sugiere consultar en Secretaría Académica.\n\n"
-        "Contexto oficial:\n{context}\n\n"
-        "Estudiante ({user_name}): {question}\n"
+        "Eres un asistente académico. Responde a la pregunta basándote ÚNICAMENTE en el siguiente contexto.\n"
+        "Si la respuesta está en el contexto, explícala de forma clara y directa.\n"
+        "Si la información no aparece en el contexto, responde únicamente: 'No encontré información sobre eso en el documento cargado.'\n\n"
+        "Contexto:\n{context}\n\n"
+        "Pregunta: {question}\n"
         "Respuesta:"
     )
 
     rag_chain = (
         {
             "context": (lambda x: x["question"]) | retriever | format_docs,
-            "history": lambda x: x["history"],
             "question": lambda x: x["question"],
-            "user_name": lambda x: x["user_name"]
         }
         | prompt_tutor
         | llm
@@ -144,7 +142,7 @@ def indexar_documento_sync(ruta_archivo: str) -> int:
     docs = loader.load()
 
     print("2. Dividiendo en fragmentos...")
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=400, chunk_overlap=50)
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=120)
     splits = text_splitter.split_documents(docs)
 
     if not splits:
