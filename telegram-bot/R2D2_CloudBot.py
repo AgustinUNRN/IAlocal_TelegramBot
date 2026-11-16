@@ -1,30 +1,35 @@
 import os
 import sys
+import csv
 import asyncio
 import base64
 import httpx
 import psycopg2
+from datetime import datetime
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
-from telegram.constants import ChatAction # para simular la accion de escribir 'Escribiendo...'
+from telegram.constants import ChatAction
 
 from langchain_chroma import Chroma
-from langchain_ollama import OllamaEmbeddings, OllamaLLM
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import RunnablePassthrough
-from langchain_core.output_parsers import StrOutputParser
+from langchain_ollama import OllamaEmbeddings, ChatOllama
+from langchain_core.tools import tool
+from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
+from langchain_community.document_loaders import PyPDFLoader, TextLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 load_dotenv()
 
 # Variables de entorno
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://ollama_sandbox:11434")
-MODEL_NAME = os.getenv("MODEL_NAME", "qwen2.5:1.5b")
-VISION_MODEL = os.getenv("VISION_MODEL", "moondream:latest")
+MODEL_NAME = os.getenv("MODEL_NAME", "qwen2.5:3b")
+VISION_MODEL = os.getenv("VISION_MODEL", "llava-phi3")
 TRANSLATOR_MODEL = os.getenv("TRANSLATOR_MODEL", "lauchacarro/qwen2.5-translator")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "nomic-embed-text")
 DB_DIR = os.getenv("CHROMA_DB_DIR", "/app/chroma_db")
+DOCS_DIR = os.getenv("DOCS_DIR", "/app/docs")
+REPORTS_DIR = os.getenv("REPORTS_DIR", "/app/reports")
 ENABLE_RAG = os.getenv("ENABLE_RAG", "true").lower() in ("true", "1", "yes")
 
 # Configuración PostgreSQL
@@ -32,6 +37,9 @@ DB_HOST = os.getenv("DB_HOST", "postgres_db")
 DB_NAME = os.getenv("POSTGRES_DB", "arturito_db")
 DB_USER = os.getenv("POSTGRES_USER", "postgres")
 DB_PASS = os.getenv("POSTGRES_PASSWORD", "postgres")
+
+os.makedirs(DOCS_DIR, exist_ok=True)
+os.makedirs(REPORTS_DIR, exist_ok=True)
 
 
 # --- CONEXIÓN Y PERSISTENCIA EN POSTGRES ---
@@ -43,23 +51,24 @@ def get_db_connection():
         password=DB_PASS
     )
 
+
 def registrar_interaccion_db(user_id, username, first_name, user_message, bot_response):
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        
+
         cur.execute("""
             INSERT INTO usuarios (telegram_id, username, nombre)
             VALUES (%s, %s, %s)
             ON CONFLICT (telegram_id) 
             DO UPDATE SET username = EXCLUDED.username, nombre = EXCLUDED.nombre;
         """, (user_id, username, first_name))
-        
+
         cur.execute("""
             INSERT INTO mensajes (telegram_id, mensaje_usuario, respuesta_bot)
             VALUES (%s, %s, %s);
         """, (user_id, user_message, bot_response))
-        
+
         conn.commit()
         cur.close()
         conn.close()
@@ -68,224 +77,181 @@ def registrar_interaccion_db(user_id, username, first_name, user_message, bot_re
         print(f"⚠️ Error al guardar en PostgreSQL: {e}")
 
 
-def obtener_historial_usuario(user_id, limit=3):
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT u.nombre, m.mensaje_usuario, m.respuesta_bot 
-            FROM mensajes m
-            JOIN usuarios u ON m.telegram_id = u.telegram_id
-            WHERE m.telegram_id = %s 
-            ORDER BY m.fecha DESC LIMIT %s;
-        """, (user_id, limit))
-        filas = cur.fetchall()
-        cur.close()
-        conn.close()
-        
-        historial = ""
-        for nombre, msg_user, resp_bot in reversed(filas):
-            historial += f"{nombre}: {msg_user}\nArturito: {resp_bot}\n"
-        return historial
-    except Exception as e:
-        print(f"⚠️ Error al obtener historial de PostgreSQL: {e}")
-        return ""
+# --- CONFIGURACIÓN DE EMBEDDINGS Y CHROMADB ---
+embeddings = OllamaEmbeddings(model=EMBEDDING_MODEL, base_url=OLLAMA_HOST)
+vectorstore = Chroma(persist_directory=DB_DIR, embedding_function=embeddings)
+retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
 
 
-# --- CONFIGURACIÓN DE MODELOS Y RAG ---
-llm = OllamaLLM(model=MODEL_NAME, base_url=OLLAMA_HOST)
+def indexar_documento_sync(ruta_archivo: str) -> int:
+    print(f"1. Cargando '{ruta_archivo}'...")
+    if ruta_archivo.lower().endswith(".pdf"):
+        loader = PyPDFLoader(ruta_archivo)
+    elif ruta_archivo.lower().endswith(".txt"):
+        loader = TextLoader(ruta_archivo, encoding="utf-8")
+    else:
+        raise ValueError("Formato no soportado. Usá .pdf o .txt")
 
-if ENABLE_RAG:
-    embeddings = OllamaEmbeddings(model=EMBEDDING_MODEL, base_url=OLLAMA_HOST)
-    vectorstore = Chroma(persist_directory=DB_DIR, embedding_function=embeddings)
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 2})
+    docs = loader.load()
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=120)
+    splits = text_splitter.split_documents(docs)
 
-    def format_docs(docs):
-        return "\n\n".join(doc.page_content for doc in docs)
+    if not splits:
+        raise ValueError("El documento no contiene texto extraíble.")
 
-    prompt_tutor = ChatPromptTemplate.from_template(
-        "Historial reciente de la conversación:\n{history}\n\n"
-        "Responde a la pregunta basándote EXCLUSIVAMENTE en el siguiente contexto oficial.\n"
-        "Si la respuesta no está en el contexto, indica que no la tienes y sugiere consultar en Secretaría Académica.\n\n"
-        "Contexto oficial:\n{context}\n\n"
-        "Estudiante ({user_name}): {question}\n"
-        "Respuesta:"
-    )
-
-    rag_chain = (
-        {
-            "context": (lambda x: x["question"]) | retriever | format_docs,
-            "history": lambda x: x["history"],
-            "question": lambda x: x["question"],
-            "user_name": lambda x: x["user_name"]
-        }
-        | prompt_tutor
-        | llm
-        | StrOutputParser()
-    )
+    vectorstore.add_documents(splits)
+    print(f"✅ Indexados {len(splits)} fragmentos.")
+    return len(splits)
 
 
-# --- PIPELINE DE VISIÓN Y TRADUCCIÓN DEDICADA ---
-async def consultar_moondream_con_traductor(base64_image: str, prompt_usuario: str) -> str:
-    url = f"{OLLAMA_HOST}/api/generate"
-    consulta = prompt_usuario.strip() if prompt_usuario and prompt_usuario.strip() else "Describe esta imagen en detalle."
-    
-    # 1. Análisis con Moondream en inglés
-    payload_vision = {
-        "model": VISION_MODEL,
-        "prompt": f"Analyze the image and answer this question in detail: {consulta}",
-        "images": [base64_image],
-        "stream": False
-    }
-    
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        resp_vision = await client.post(url, json=payload_vision)
-        if resp_vision.status_code != 200:
-            print(f"❌ Error Ollama API Vision ({resp_vision.status_code}): {resp_vision.text}")
-            resp_vision.raise_for_status()
-            
-        desc_ingles = resp_vision.json().get("response", "").strip()
-        if not desc_ingles:
-            print("⚠️ Moondream devolvió una respuesta vacía.")
-            return "No logré extraer una respuesta clara de esta imagen."
-            
-        print(f"👁️ Moondream (EN): {desc_ingles}")
+# --- DEFINICIÓN DE HERRAMIENTAS DEL AGENTE (@tool) ---
+def construir_herramientas_usuario(user_id: int, archivos_generados: list[str]):
+    """Crea las herramientas vinculadas al contexto del usuario actual."""
 
-        # 2. Traducción con modelo dedicado y Temperatura 0.0
-        prompt_traduccion = (
-            f"Translate the following text to Spanish considering the user request: '{consulta}'.\n"
-            f"Text to translate: {desc_ingles}\n"
-            f"Spanish translation:"
+    @tool
+    def buscar_en_documentos_rag(consulta: str) -> str:
+        """Busca información técnica, normativa o académica dentro de los documentos PDF y TXT cargados en la base de conocimiento."""
+        if not ENABLE_RAG:
+            return "El módulo de documentos RAG está desactivado actualmente."
+        docs = retriever.invoke(consulta)
+        if not docs:
+            return "No se encontraron fragmentos relevantes en los documentos cargados."
+        return "\n\n---\n\n".join(
+            f"[Fuente: {os.path.basename(d.metadata.get('source', 'doc'))}]\n{d.page_content}"
+            for d in docs
         )
 
-        payload_traduccion = {
-            "model": TRANSLATOR_MODEL,
-            "prompt": prompt_traduccion,
-            "stream": False,
-            "options": {
-                "temperature": 0.0,
-                "top_p": 0.1
+    @tool
+    def buscar_historial_postgresql(palabra_clave: str) -> str:
+        """Busca en el historial de conversaciones pasadas del usuario en PostgreSQL filtrando por una palabra clave."""
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT fecha, mensaje_usuario, respuesta_bot
+                FROM mensajes
+                WHERE telegram_id = %s
+                  AND (mensaje_usuario ILIKE %s OR respuesta_bot ILIKE %s)
+                ORDER BY fecha DESC
+                LIMIT 5;
+            """, (user_id, f"%{palabra_clave}%", f"%{palabra_clave}%"))
+            filas = cur.fetchall()
+            cur.close()
+            conn.close()
+
+            if not filas:
+                return f"No se encontraron registros previos con '{palabra_clave}'."
+
+            resultado = []
+            for fecha, msg_u, resp_b in filas:
+                fecha_str = fecha.strftime("%d/%m/%Y %H:%M")
+                resultado.append(f"[{fecha_str}] Usuario: {msg_u} | Arturito: {resp_b[:250]}...")
+            return "\n".join(resultado)
+        except Exception as e:
+            return f"Error al consultar PostgreSQL: {e}"
+
+    @tool
+    def generar_reporte_archivo(titulo: str, contenido: str, formato: str = "txt") -> str:
+        """Genera un archivo descargable (.txt o .csv) con un resumen, informe o tabla solicitada por el usuario para enviarlo por Telegram."""
+        ext = "csv" if formato.lower().strip(".") == "csv" else "txt"
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        nombre_limpio = "".join(c if c.isalnum() or c in ("_", "-") else "_" for c in titulo)[:30]
+        ruta_archivo = os.path.join(REPORTS_DIR, f"{nombre_limpio}_{timestamp}.{ext}")
+
+        try:
+            if ext == "csv":
+                with open(ruta_archivo, "w", newline="", encoding="utf-8") as f:
+                    writer = csv.writer(f)
+                    for linea in contenido.strip().splitlines():
+                        writer.writerow([col.strip() for col in linea.split(",")])
+            else:
+                with open(ruta_archivo, "w", encoding="utf-8") as f:
+                    f.write(f"=== {titulo.upper()} ===\n")
+                    f.write(f"Fecha: {datetime.now().strftime('%d/%m/%Y %H:%M')}\n\n")
+                    f.write(contenido.strip() + "\n")
+
+            archivos_generados.append(ruta_archivo)
+            return f"Archivo '{os.path.basename(ruta_archivo)}' generado con éxito. Se adjuntará automáticamente en el chat."
+        except Exception as e:
+            return f"No se pudo crear el archivo: {e}"
+
+    return [buscar_en_documentos_rag, buscar_historial_postgresql, generar_reporte_archivo]
+
+
+# --- BUCLE DE EJECUCIÓN DEL AGENTE ---
+llm_chat = ChatOllama(model=MODEL_NAME, base_url=OLLAMA_HOST, temperature=0.2)
+
+
+async def ejecutar_agente(
+    update: Update,
+    user_id: int,
+    first_name: str,
+    user_message: str
+) -> tuple[str, list[str]]:
+    archivos_generados: list[str] = []
+    herramientas = construir_herramientas_usuario(user_id, archivos_generados)
+    mapa_herramientas = {t.name: t for t in herramientas}
+    llm_con_tools = llm_chat.bind_tools(herramientas)
+
+    archivos_cargados = [f for f in os.listdir(DOCS_DIR) if f.lower().endswith((".pdf", ".txt"))]
+    lista_docs = ", ".join(archivos_cargados) if archivos_cargados else "ninguno"
+
+    system_prompt = SystemMessage(content=(
+        f"Eres Arturito, un asistente con herramientas locales que responde en español a {first_name}.\n"
+        f"Archivos disponibles en tu memoria: [{lista_docs}].\n"
+        "REGLAS OBLIGATORIAS:\n"
+        "1. Si te preguntan qué documentos o archivos tienes cargados, responde directamente enumerando los nombres de la lista de arriba SIN usar herramientas.\n"
+        "2. Si te preguntan sobre el contenido, leyes, artículos o datos dentro de esos archivos, ejecuta 'buscar_en_documentos_rag'.\n"
+        "3. Si te piden recordar o buscar conversaciones anteriores, ejecuta 'buscar_historial_postgresql'.\n"
+        "4. Si te piden crear, exportar o descargar un archivo .txt o .csv, ejecuta 'generar_reporte_archivo'.\n"
+        "5. Solo responde sin usar herramientas si es un saludo o charla casual."
+    ))
+
+    mensajes = [system_prompt, HumanMessage(content=user_message)]
+
+    for _ in range(3):
+        respuesta_ai = await asyncio.to_thread(llm_con_tools.invoke, mensajes)
+        mensajes.append(respuesta_ai)
+
+        if not respuesta_ai.tool_calls:
+            return str(respuesta_ai.content).strip(), archivos_generados
+
+        for tool_call in respuesta_ai.tool_calls:
+            nombre_tool = tool_call["name"]
+            args_tool = tool_call["args"]
+            call_id = tool_call["id"]
+
+            etiquetas = {
+                "buscar_en_documentos_rag": "📚 Buscando en documentos RAG...",
+                "buscar_historial_postgresql": "🗄️ Consultando bitácora en PostgreSQL...",
+                "generar_reporte_archivo": "📝 Generando archivo de reporte..."
             }
-        }
+            aviso = etiquetas.get(nombre_tool, f"⚙️ Ejecutando {nombre_tool}...")
+            print(f"🤖 Agente invoca -> {nombre_tool}({args_tool})")
+            await update.message.reply_text(aviso)
 
-        resp_trad = await client.post(url, json=payload_traduccion)
-        if resp_trad.status_code == 200:
-            traduccion = resp_trad.json().get("response", "").strip()
-            print(f"🌐 Traducción (ES): {traduccion}")
-            return traduccion
-            
-        return desc_ingles
+            if nombre_tool in mapa_herramientas:
+                resultado_tool = await asyncio.to_thread(
+                    mapa_herramientas[nombre_tool].invoke,
+                    args_tool
+                )
+            else:
+                resultado_tool = f"Herramienta desconocida: {nombre_tool}"
 
+            mensajes.append(ToolMessage(content=str(resultado_tool), tool_call_id=call_id))
 
-# --- HANDLER PARA TEXTO (QWEN 2.5) ---
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text:
-        return
-
-    user = update.message.from_user
-    user_id = user.id
-    username = user.username or ""
-    first_name = user.first_name or "Estudiante"
-    user_message = update.message.text.strip().replace('"', "")
-
-    typing_task = asyncio.create_task(
-        mantener_typing(context, update.effective_chat.id)
-    )
-
-    try:
-        historial = await asyncio.to_thread(
-            obtener_historial_usuario, user_id, 3
-        )
-
-        if ENABLE_RAG:
-            # La cadena hace la recuperación; no llames antes a retriever.invoke().
-            reply = await asyncio.to_thread(
-                rag_chain.invoke,
-                {
-                    "question": user_message,
-                    "history": historial,
-                    "user_name": first_name
-                }
-            )
-        else:
-            prompt_final = (
-                f"Historial previo de la conversación:\n{historial}\n"
-                f"Usuario: {first_name} Mensaje: {user_message}\n"
-                "Respuesta:"
-            )
-            reply = await asyncio.to_thread(llm.invoke, prompt_final)
-
-    except Exception as e:
-        reply = "Error al procesar la consulta 😢"
-        print(f"❌ Error LLM: {e}")
-
-    finally:
-        await detener_typing(typing_task)
-
-    reply = str(reply).strip() or "No pude generar una respuesta."
-
-    await asyncio.to_thread(
-        registrar_interaccion_db,
-        user_id,
-        username,
-        first_name,
-        user_message,
-        reply
-    )
-
-    await enviar_respuesta_larga(update, reply)
+    respuesta_final = await asyncio.to_thread(llm_chat.invoke, mensajes)
+    return str(respuesta_final.content).strip(), archivos_generados
 
 
-
+# --- UTILIDADES DE TELEGRAM ---
 async def mantener_typing(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     while True:
         try:
-            await context.bot.send_chat_action(
-                chat_id=chat_id,
-                action=ChatAction.TYPING
-            )
-        except Exception as e:
-            print(f"⚠️ No se pudo actualizar el indicador typing: {e}")
-
+            await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+        except Exception:
+            pass
         await asyncio.sleep(4)
-
-def dividir_texto(texto: str, limite: int = 3900) -> list[str]:
-    """Divide texto en partes seguras para Telegram, respetando emojis."""
-    texto = texto.strip()
-    partes = []
-
-    while texto:
-        unidades = 0
-        corte = 0
-
-        for i, caracter in enumerate(texto):
-            peso = 2 if ord(caracter) > 0xFFFF else 1
-            if unidades + peso > limite:
-                break
-            unidades += peso
-            corte = i + 1
-
-        if corte == len(texto):
-            partes.append(texto)
-            break
-
-        # Si se puede, corta en un salto de línea o espacio.
-        corte_espacio = max(
-            texto.rfind("\n", 0, corte),
-            texto.rfind(" ", 0, corte)
-        )
-        if corte_espacio > corte // 2:
-            corte = corte_espacio
-
-        partes.append(texto[:corte].strip())
-        texto = texto[corte:].lstrip()
-
-    return partes or [" "]
-
-
-async def enviar_respuesta_larga(update: Update, texto: str):
-    for parte in dividir_texto(texto):
-        await update.message.reply_text(parte)
 
 
 async def detener_typing(typing_task: asyncio.Task):
@@ -296,101 +262,210 @@ async def detener_typing(typing_task: asyncio.Task):
         pass
 
 
-# --- HANDLER PARA FOTOS ---
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message:
+def dividir_texto(texto: str, limite: int = 3900) -> list[str]:
+    texto = texto.strip()
+    partes = []
+    while texto:
+        unidades = 0
+        corte = 0
+        for i, caracter in enumerate(texto):
+            peso = 2 if ord(caracter) > 0xFFFF else 1
+            if unidades + peso > limite:
+                break
+            unidades += peso
+            corte = i + 1
+        if corte == len(texto):
+            partes.append(texto)
+            break
+        corte_espacio = max(texto.rfind("\n", 0, corte), texto.rfind(" ", 0, corte))
+        if corte_espacio > corte // 2:
+            corte = corte_espacio
+        partes.append(texto[:corte].strip())
+        texto = texto[corte:].lstrip()
+    return partes or [" "]
+
+
+async def enviar_respuesta_larga(update: Update, texto: str):
+    for parte in dividir_texto(texto):
+        await update.message.reply_text(parte)
+
+
+# --- PIPELINE DE VISIÓN ---
+async def consultar_modelo_vision(base64_image: str, prompt_usuario: str) -> str:
+    url = f"{OLLAMA_HOST}/api/generate"
+    consulta = prompt_usuario.strip() if prompt_usuario and prompt_usuario.strip() else "Describe esta imagen en detalle."
+    es_moondream = "moondream" in VISION_MODEL.lower()
+
+    prompt_vision = (
+        f"Analyze the image and answer this question in detail: {consulta}"
+        if es_moondream
+        else f"Responde a la siguiente consulta sobre la imagen en español: {consulta}"
+    )
+
+    payload_vision = {
+        "model": VISION_MODEL,
+        "prompt": prompt_vision,
+        "images": [base64_image],
+        "stream": False
+    }
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=30.0)) as client:
+        resp_vision = await client.post(url, json=payload_vision)
+        resp_vision.raise_for_status()
+        respuesta_raw = resp_vision.json().get("response", "").strip()
+        if not respuesta_raw:
+            return "No logré extraer una respuesta clara de esta imagen."
+
+        if not es_moondream:
+            return respuesta_raw
+
+        prompt_traduccion = (
+            f"Translate the following text to Spanish considering the user request: '{consulta}'.\n"
+            f"Text to translate: {respuesta_raw}\n"
+            f"Spanish translation:"
+        )
+        resp_trad = await client.post(url, json={
+            "model": TRANSLATOR_MODEL,
+            "prompt": prompt_traduccion,
+            "stream": False,
+            "options": {"temperature": 0.0, "top_p": 0.1}
+        })
+        if resp_trad.status_code == 200:
+            return resp_trad.json().get("response", "").strip()
+        return respuesta_raw
+
+
+# --- HANDLERS ---
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.document:
         return
 
-    es_imagen = (
-        update.message.photo
-        or (
-            update.message.document
-            and update.message.document.mime_type
-            and update.message.document.mime_type.startswith("image/")
-        )
+    doc = update.message.document
+    nombre_archivo = doc.file_name or "documento.pdf"
+    if not nombre_archivo.lower().endswith((".pdf", ".txt")):
+        return
+
+    user = update.message.from_user
+    mensaje_estado = await update.message.reply_text(
+        f"📥 Recibido {nombre_archivo}. Indexando en la base de conocimiento RAG... ⏳"
     )
-    if not es_imagen:
+    typing_task = asyncio.create_task(mantener_typing(context, update.effective_chat.id))
+    ruta_destino = os.path.join(DOCS_DIR, nombre_archivo)
+
+    try:
+        telegram_file = await doc.get_file()
+        await telegram_file.download_to_drive(ruta_destino)
+        cantidad_chunks = await asyncio.to_thread(indexar_documento_sync, ruta_destino)
+        reply = (
+            f"✅ Documento {nombre_archivo} indexado correctamente en el RAG.\n"
+            f"• Fragmentos generados: {cantidad_chunks}\n"
+            f"• Ya podés pedirme consultas o reportes sobre su contenido."
+        )
+    except Exception as e:
+        reply = f"❌ Error al indexar {nombre_archivo}: {e}"
+    finally:
+        await detener_typing(typing_task)
+
+    await asyncio.to_thread(
+        registrar_interaccion_db,
+        user.id,
+        user.username or "",
+        user.first_name or "Estudiante",
+        f"[INGESTA RAG] {nombre_archivo}",
+        reply
+    )
+    await mensaje_estado.edit_text(reply)
+
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
         return
 
     user = update.message.from_user
     user_id = user.id
     username = user.username or ""
     first_name = user.first_name or "Estudiante"
+    user_message = update.message.text.strip()
 
-    caption_usuario = update.message.caption
-    if caption_usuario and caption_usuario.strip():
-        prompt_moondream = caption_usuario.strip()
-        user_message_log = f"[FOTO CON DESCRIPCIÓN] {prompt_moondream}"
-    else:
-        prompt_moondream = "Describe esta imagen en detalle."
-        user_message_log = "[FOTO SIN DESCRIPCIÓN]"
-
-    mensaje_estado = await update.message.reply_text(
-        "🔎 Analizando la imagen… Puede tardar hasta 2 minutos."
-    )
-
-    typing_task = asyncio.create_task(
-        mantener_typing(context, update.effective_chat.id)
-    )
+    typing_task = asyncio.create_task(mantener_typing(context, update.effective_chat.id))
+    archivos_adjuntos: list[str] = []
 
     try:
-        if update.message.photo:
-            photo_file = await update.message.photo[-1].get_file()
-        else:
-            photo_file = await update.message.document.get_file()
-
-        photo_bytes = await photo_file.download_as_bytearray()
-        base64_image = base64.b64encode(photo_bytes).decode("utf-8")
-
-        reply = await consultar_moondream_con_traductor(
-            base64_image,
-            prompt_moondream
-        )
-
+        reply, archivos_adjuntos = await ejecutar_agente(update, user_id, first_name, user_message)
     except Exception as e:
-        reply = "Ocurrió un error al procesar la imagen 🖼️"
-        print(f"❌ Error en handle_photo: {e}")
-
+        reply = "Ocurrió un error al ejecutar el agente 😢"
+        print(f"❌ Error Agente: {e}")
     finally:
         await detener_typing(typing_task)
 
-    reply_final = (
-        str(reply).strip()
-        if reply and str(reply).strip()
-        else "No pude procesar el contenido de la imagen."
-    )
+    reply = reply or "No pude generar una respuesta."
 
-    # Registrar una sola vez.
     await asyncio.to_thread(
-        registrar_interaccion_db,
-        user_id,
-        username,
-        first_name,
-        user_message_log,
-        reply_final
+        registrar_interaccion_db, user_id, username, first_name, user_message, reply
     )
 
-    partes = dividir_texto(reply_final)
+    await enviar_respuesta_larga(update, reply)
+
+    for ruta_archivo in archivos_adjuntos:
+        if os.path.exists(ruta_archivo):
+            with open(ruta_archivo, "rb") as f:
+                await update.message.reply_document(
+                    document=f,
+                    filename=os.path.basename(ruta_archivo),
+                    caption="📎 Reporte generado por el agente."
+                )
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+
+    es_imagen = update.message.photo or (
+        update.message.document
+        and update.message.document.mime_type
+        and update.message.document.mime_type.startswith("image/")
+    )
+    if not es_imagen:
+        return
+
+    user = update.message.from_user
+    caption_usuario = update.message.caption
+    prompt_vision = caption_usuario.strip() if caption_usuario and caption_usuario.strip() else "Describe esta imagen en detalle."
+    user_message_log = f"[FOTO] {prompt_vision}"
+
+    mensaje_estado = await update.message.reply_text("🔎 Analizando la imagen…")
+    typing_task = asyncio.create_task(mantener_typing(context, update.effective_chat.id))
 
     try:
-        await mensaje_estado.edit_text(partes[0])
+        photo_file = await (update.message.photo[-1].get_file() if update.message.photo else update.message.document.get_file())
+        photo_bytes = await photo_file.download_as_bytearray()
+        base64_image = base64.b64encode(photo_bytes).decode("utf-8")
+        reply = await consultar_modelo_vision(base64_image, prompt_vision)
     except Exception as e:
-        print(f"⚠️ No se pudo editar el mensaje de estado: {e}")
-        await update.message.reply_text(partes[0])
+        reply = "Ocurrió un error al procesar la imagen 🖼️"
+        print(f"❌ Error en handle_photo: {e}")
+    finally:
+        await detener_typing(typing_task)
 
-    # Si la respuesta ocupa más de un mensaje, enviar las partes restantes.
+    await asyncio.to_thread(
+        registrar_interaccion_db,
+        user.id,
+        user.username or "",
+        user.first_name or "Estudiante",
+        user_message_log,
+        reply
+    )
+
+    partes = dividir_texto(reply)
+    await mensaje_estado.edit_text(partes[0])
     for parte in partes[1:]:
         await update.message.reply_text(parte)
 
 
-
 if __name__ == "__main__":
-    print(f"✨ Bot activado | Modo RAG: {'ACTIVADO' if ENABLE_RAG else 'DESACTIVADO (Modo Rápido)'}")
-    print(f"🧠 Texto: {MODEL_NAME} | 🌐 Traductor: {TRANSLATOR_MODEL} | 👁️ Visión: {VISION_MODEL}")
-    
+    print(f"✨ Bot Agente activado | Modelo: {MODEL_NAME} | RAG: {ENABLE_RAG} | Visión: {VISION_MODEL}")
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    
+    app.add_handler(MessageHandler(filters.Document.PDF | filters.Document.TXT, handle_document))
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
     app.run_polling()
