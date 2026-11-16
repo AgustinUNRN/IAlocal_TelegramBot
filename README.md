@@ -1,8 +1,18 @@
+# 🤖 R2D2 CloudBot (Arturito) — Agente IA Local en Docker
 
+Asistente conversacional y **agente autónomo** dockerizado para Telegram, ejecutándose 100% en entorno local sin dependencias de APIs externas en la nube. Integra **Ollama** (`qwen2.5:3b` y `llava-phi3`), recuperación aumentada por generación (**RAG**) con **ChromaDB**, y persistencia relacional de usuarios e historial en **PostgreSQL**.
 
-# 🤖 R2D2 CloudBot (Arturito) - IA Local En Docker
+---
 
-Asistente conversacional dockerizado para Telegram. Implementa arquitectura local de LLM con **Ollama** (`qwen2.5:1.5b`), recuperación aumentada por generación (**RAG**) sobre documentos mediante **ChromaDB**, y persistencia relacional de usuarios e historial de chat en **PostgreSQL**.
+## 🧠 Capacidades del Agente
+
+A diferencia de un chatbot lineal, **Arturito** utiliza *Tool Calling* (`ChatOllama` + `bind_tools` en LangChain) para razonar sobre cada mensaje y decidir autónomamente qué acción ejecutar:
+
+1. **📚 Consulta de Documentos (`buscar_en_documentos_rag`):** Busca información semántica en los archivos `.pdf` y `.txt` indexados en **ChromaDB** (`nomic-embed-text`).
+2. **🗄️ Bitácora Histórica (`buscar_historial_postgresql`):** Consulta conversaciones previas en **PostgreSQL** filtrando estrictamente por el `telegram_id` del usuario activo.
+3. **📝 Generación de Reportes (`generar_reporte_archivo`):** Crea archivos descargables (`.txt` o `.csv`) con resúmenes o datos procesados y los envía automáticamente como documento adjunto en Telegram.
+4. **🖼️ Análisis Multimodal de Imágenes:** Procesa fotografías enviadas al chat utilizando modelos de visión locales (`llava-phi3` o `moondream` con traducción automática).
+5. **📥 Ingesta Dinámica por Chat:** Permite enviar archivos `.pdf` o `.txt` directamente como documento al bot de Telegram para fragmentarlos e indexarlos al instante en el RAG.
 
 ---
 
@@ -10,9 +20,11 @@ Asistente conversacional dockerizado para Telegram. Implementa arquitectura loca
 
 El entorno está orquestado con **Docker Compose** e integra tres servicios aislados en red local (`ai_sandbox_net`):
 
-* **`telegram_bot`**: Aplicación en Python que ejecuta el handler de Telegram, orquesta las cadenas de LangChain y gestiona las conexiones con PostgreSQL y ChromaDB.
-* **`ollama-isolated`**: Servidor local de Ollama que expone el modelo LLM (`qwen2.5:1.5b`) y los embeddings (`nomic-embed-text`).
-* **`postgres_db`**: Base de datos PostgreSQL para el registro y persistencia relacional de estudiantes y mensajes.
+* **`telegram_bot` (`telegram_bot_sandbox`):** Aplicación en Python que gestiona los handlers de Telegram, el bucle del agente LangChain, la ingesta de archivos, la generación de reportes y las conexiones con PostgreSQL y ChromaDB.
+* **`ollama-isolated` (`ollama_sandbox`):** Servidor local de Ollama que expone el modelo principal del agente (`qwen2.5:3b`), el modelo de visión (`llava-phi3`) y el modelo de embeddings (`nomic-embed-text`).
+* **`postgres_db` (`postgres_db_sandbox`):** Base de datos PostgreSQL para el registro y persistencia relacional de usuarios y mensajes.
+
+*(Para ver el árbol de directorios completo, consultá [`architecture.md`](./architecture.md)).*
 
 ---
 
@@ -25,20 +37,18 @@ El entorno está orquestado con **Docker Compose** e integra tres servicios aisl
 
 ## ⚙️ Configuración del Entorno
 
-El proyecto utiliza una estructura de variables de entorno dividida entre la raíz y la subcarpeta del bot.
+El proyecto divide la configuración entre la raíz (`env`) y la subcarpeta del bot (`telegram-bot/env`). Podés copiar las plantillas incluidas o crear los archivos `.env` manualmente:
 
 ### 1. Variables Globales (Raíz)
-Crear el archivo `.env` en la raíz del proyecto para definir infraestructura y modelos:
+Crear `.env` en la raíz del proyecto:
 
 ```env
-# Modelos de Ollama
-MODEL_NAME=qwen2.5:1.5b
+# Configuración del modelo Ollama
+MODEL_NAME=qwen2.5:3b
 EMBEDDING_MODEL=nomic-embed-text
-
-# Configuración PostgreSQL
-POSTGRES_DB=telegram_bot_db
-POSTGRES_USER=bot_user
-POSTGRES_PASSWORD=bot_password_segura
+OLLAMA_HOST=http://ollama_sandbox:11434
+VISION_MODEL=moondream:1.8b
+TRANSLATOR_MODEL=lauchacarro/qwen2.5-translator
 ```
 ### 2 Variables del Bot (telegram-bot/)
 1. Ubicarse en el directorio principal e ingresar a la carpeta del bot:
@@ -55,15 +65,14 @@ POSTGRES_PASSWORD=bot_password_segura
     # Credenciales de Telegram
     TELEGRAM_BOT_TOKEN=tu_token_de_telegram_aqui
 
-    # Persistencia PostgreSQL
-    DB_HOST=postgres_db_sandbox
+    # Configuración PostgreSQL
+    DB_HOST=postgres_db
     POSTGRES_DB=telegram_bot_db
     POSTGRES_USER=bot_user
     POSTGRES_PASSWORD=bot_password_segura
 
-    # Configuración de Modo
-    ENABLE_RAG=false
-    CHROMA_DB_DIR=/app/chroma_db
+    # Configuración RAG
+    ENABLE_RAG=true
     ```
 
 ## 🛠️ Despliegue e Inicio de Servicios
@@ -82,24 +91,25 @@ Nota: La descarga de los modelos ocurre de forma automática durante la etapa de
 
 Si los modelos no están descargados internamente, ejecutá:
 ```Bash
-docker exec -it ollama_sandbox ollama pull qwen2.5:1.5b
+docker exec -it ollama_sandbox ollama pull qwen2.5:3b
 docker exec -it ollama_sandbox ollama pull nomic-embed-text
+docker exec -it ollama_sandbox ollama pull moondream:1.8b
+docker exec -it ollama_sandbox ollama pull lauchacarro/qwen2.5-translator
 ```
 
 ## 📄 Ingesta de Documentos (Modo RAG)
 
-Para alimentar la base vectorial con reglamentos o archivos PDF/TXT institucionales:
+Existen dos formas de cargar documentos .pdf o .txt en la base vectori
 
-1.  Colocar los archivos PDF dentro de telegram-bot/docs/.
+- Directamente desde Telegram (Recomendado): Adjuntá y enviá cualquier archivo .pdf o .txt al chat del bot. Arturito lo guardará en telegram-bot/docs/, lo fragmentará e indexará automáticamente en ChromaDB.
 
-2.  Ejecutar el script de ingesta dentro del contenedor:
+- Por línea de comandos (Consola):
+
+1.  Copiar el archivo dentro de telegram-bot/docs/.
+
+2.  Ejecutar el script auxiliar dentro del contenedor:
     ```Bash
     docker exec -it telegram_bot_sandbox python ingest.py --file /app/docs/TuDocumento.pdf
-    ```
-
-3.  Activar RAG cambiando ENABLE_RAG=true en el .env y reiniciando el servicio:
-    ```Bash
-    docker compose up -d telegram_bot
     ```
 
 ## 📊 Mantenimiento y Monitoreo
@@ -142,5 +152,9 @@ Para alimentar la base vectorial con reglamentos o archivos PDF/TXT instituciona
    2. Aplicar los cambios
         ```Bash
         docker compose up -d telegram_bot
+        ```
+   3. Detener todos los servicios:
+         ```Bash
+        docker compose down
         ```
 
