@@ -1,3 +1,4 @@
+cat << 'EOF' > architecture.md
 # Arquitectura del Proyecto — Arturito (`R2D2_CloudBot`)
 
 Asistente conversacional y agente autónomo desplegado localmente mediante **Docker Compose**, integrado con **Telegram**, **Ollama**, **ChromaDB** y **PostgreSQL**.
@@ -6,19 +7,21 @@ Asistente conversacional y agente autónomo desplegado localmente mediante **Doc
 
 ```text
 .
-├── docker-compose.yml       # Orquestación de servicios (Ollama, PostgreSQL y Bot de Telegram)
-├── Dockerfile               # Imagen base del entorno Ollama
-├── .env                     # Variables de entorno globales (ignoradas en Git)
-├── env                      # Plantilla de configuración de entorno
-├── architecture.md          # Documentación de la arquitectura del sistema
-├── README.md                # Guía de instalación y uso
+├── architecture.md              # Documentación de la arquitectura del sistema
+├── docker-compose.yml           # Orquestación principal (Ollama, PostgreSQL y Bot de Telegram)
+├── Dockerfile                   # Imagen base del entorno Ollama
+├── env                          # Plantilla de variables de entorno globales (.env ignorado en Git)
+├── README.md                    # Guía de instalación y uso del proyecto
+├── ollama_minimalista/          # Entorno aislado minimalista de prueba para Ollama
+│   ├── docker-compose.yml
+│   └── Dockerfile
 └── telegram-bot/
-    ├── Dockerfile.telegram  # Imagen del contenedor del bot Python
-    ├── R2D2_CloudBot.py     # Lógica principal: Agente LangChain, RAG, Visión y Handlers de Telegram
-    ├── init.sql             # Esquema inicial de tablas en PostgreSQL (usuarios y mensajes)
-    ├── ingest.py            # Script auxiliar de ingesta por consola
-    ├── .env                 # Configuración específica del bot (tokens y modelos)
-    ├── env                  # Plantilla de variables del bot
-    ├── docs/                # Almacenamiento local de PDFs y TXTs cargados para RAG (ignorado en Git)
-    ├── chroma_db/           # Base de datos vectorial persistente de ChromaDB (ignorada en Git)
-    └── reports/             # Reportes .txt y .csv generados dinámicamente por el agente (ignorado en Git)
+    ├── Dockerfile.telegram      # Imagen del contenedor del bot en Python
+    ├── R2D2_CloudBot.py         # Agente LangChain, RAG, pipeline de visión y handlers de Telegram
+    ├── init.sql                 # Esquema inicial de tablas en PostgreSQL (usuarios y mensajes)
+    ├── ingest.py                # Script auxiliar de ingesta de documentos por consola
+    ├── env                      # Plantilla de variables del bot (.env ignorado en Git)
+    ├── README.md                # Documentación específica del servicio de Telegram
+    ├── docs/                    # [Local / Ignorado en Git] Documentos PDF y TXT indexados en el RAG
+    ├── chroma_db/               # [Local / Ignorado en Git] Base de datos vectorial de ChromaDB
+    └── reports/                 # [Local / Ignorado en Git] Reportes .txt y .csv generados por el agente
