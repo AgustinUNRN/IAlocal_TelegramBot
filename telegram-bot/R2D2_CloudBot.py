@@ -109,18 +109,23 @@ if ENABLE_RAG:
         return "\n\n".join(doc.page_content for doc in docs)
 
     prompt_tutor = ChatPromptTemplate.from_template(
-        "Eres un asistente académico. Responde a la pregunta basándote ÚNICAMENTE en el siguiente contexto.\n"
-        "Si la respuesta está en el contexto, explícala de forma clara y directa.\n"
-        "Si la información no aparece en el contexto, responde únicamente: 'No encontré información sobre eso en el documento cargado.'\n\n"
-        "Contexto:\n{context}\n\n"
-        "Pregunta: {question}\n"
-        "Respuesta:"
-    )
+    "Eres un asistente académico. Responde a la pregunta actual del estudiante basándote EXCLUSIVAMENTE en el 'Contexto oficial' proporcionado abajo.\n"
+    "REGLAS:\n"
+    "1. Ignora el 'Historial reciente' si trata sobre un tema distinto a la pregunta actual.\n"
+    "2. Sintetiza toda la información relevante que encuentres en el 'Contexto oficial'.\n"
+    "3. Solo si el 'Contexto oficial' no contiene absolutamente nada relacionado, indica que no figura en el documento.\n\n"
+    "Contexto oficial:\n{context}\n\n"
+    "Historial reciente (solo referencia):\n{history}\n\n"
+    "Pregunta actual de {user_name}: {question}\n"
+    "Respuesta:"
+)
 
     rag_chain = (
         {
             "context": (lambda x: x["question"]) | retriever | format_docs,
+            "history": lambda x: x["history"],
             "question": lambda x: x["question"],
+            "user_name": lambda x: x["user_name"]
         }
         | prompt_tutor
         | llm
