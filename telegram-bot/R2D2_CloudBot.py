@@ -24,13 +24,14 @@ load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://ollama_sandbox:11434")
 MODEL_NAME = os.getenv("MODEL_NAME", "qwen2.5:3b")
-VISION_MODEL = os.getenv("VISION_MODEL", "llava-phi3")
+VISION_MODEL = os.getenv("VISION_MODEL", "moondream:1.8b")
 TRANSLATOR_MODEL = os.getenv("TRANSLATOR_MODEL", "lauchacarro/qwen2.5-translator")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "nomic-embed-text")
 DB_DIR = os.getenv("CHROMA_DB_DIR", "/app/chroma_db")
 DOCS_DIR = os.getenv("DOCS_DIR", "/app/docs")
 REPORTS_DIR = os.getenv("REPORTS_DIR", "/app/reports")
 ENABLE_RAG = os.getenv("ENABLE_RAG", "true").lower() in ("true", "1", "yes")
+CODER_MODEL = os.getenv("CODER_MODEL", "qwen2.5-coder:1.5b")
 
 # Configuración PostgreSQL
 DB_HOST = os.getenv("DB_HOST", "postgres_db")
@@ -109,6 +110,17 @@ def construir_herramientas_usuario(user_id: int, archivos_generados: list[str]):
     """Crea las herramientas vinculadas al contexto del usuario actual."""
 
     @tool
+    def resolver_programacion_codigo(tarea_codigo: str) -> str:
+        """Delega tareas de programación, generación de scripts (Python, SQL, Bash, Java, HTML, etc.), depuración de errores o explicación técnica de código a un modelo especializado en programación."""
+        prompt_coder = (
+            "Eres un ingeniero de software experto. Resuelve la siguiente solicitud de programación "
+            "en español de forma clara, directa y con código bien estructurado:\n\n"
+            f"{tarea_codigo}"
+        )
+        respuesta = llm_coder.invoke(prompt_coder)
+        return str(respuesta.content).strip()
+
+    @tool
     def buscar_en_documentos_rag(consulta: str) -> str:
         """Busca información técnica, normativa o académica dentro de los documentos PDF y TXT cargados en la base de conocimiento."""
         if not ENABLE_RAG:
@@ -122,25 +134,39 @@ def construir_herramientas_usuario(user_id: int, archivos_generados: list[str]):
         )
 
     @tool
-    def buscar_historial_postgresql(palabra_clave: str) -> str:
-        """Busca en el historial de conversaciones pasadas del usuario en PostgreSQL filtrando por una palabra clave."""
+    def buscar_historial_postgresql(palabra_clave: str = "") -> str:
+        """Busca en el historial de conversaciones pasadas del usuario en PostgreSQL. Si se indica palabra_clave filtra por ella; si se deja vacía devuelve los últimos mensajes recientes."""
         try:
             conn = get_db_connection()
             cur = conn.cursor()
-            cur.execute("""
-                SELECT fecha, mensaje_usuario, respuesta_bot
-                FROM mensajes
-                WHERE telegram_id = %s
-                  AND (mensaje_usuario ILIKE %s OR respuesta_bot ILIKE %s)
-                ORDER BY fecha DESC
-                LIMIT 5;
-            """, (user_id, f"%{palabra_clave}%", f"%{palabra_clave}%"))
+            clave = (palabra_clave or "").strip()
+            if clave:
+                cur.execute("""
+                    SELECT fecha, mensaje_usuario, respuesta_bot
+                    FROM mensajes
+                    WHERE telegram_id = %s
+                      AND (mensaje_usuario ILIKE %s OR respuesta_bot ILIKE %s)
+                    ORDER BY fecha DESC
+                    LIMIT 6;
+                """, (user_id, f"%{clave}%", f"%{clave}%"))
+            else:
+                cur.execute("""
+                    SELECT fecha, mensaje_usuario, respuesta_bot
+                    FROM mensajes
+                    WHERE telegram_id = %s
+                    ORDER BY fecha DESC
+                    LIMIT 8;
+                """, (user_id,))
             filas = cur.fetchall()
             cur.close()
             conn.close()
 
             if not filas:
-                return f"No se encontraron registros previos con '{palabra_clave}'."
+                return (
+                    f"No se encontraron registros previos con '{clave}'."
+                    if clave
+                    else "Aún no hay mensajes previos registrados en el historial."
+                )
 
             resultado = []
             for fecha, msg_u, resp_b in filas:
@@ -175,11 +201,17 @@ def construir_herramientas_usuario(user_id: int, archivos_generados: list[str]):
         except Exception as e:
             return f"No se pudo crear el archivo: {e}"
 
-    return [buscar_en_documentos_rag, buscar_historial_postgresql, generar_reporte_archivo]
+    return [
+        resolver_programacion_codigo,
+        buscar_en_documentos_rag,
+        buscar_historial_postgresql,
+        generar_reporte_archivo
+    ]
 
 
 # --- BUCLE DE EJECUCIÓN DEL AGENTE ---
 llm_chat = ChatOllama(model=MODEL_NAME, base_url=OLLAMA_HOST, temperature=0.2)
+llm_coder = ChatOllama(model=CODER_MODEL, base_url=OLLAMA_HOST, temperature=0.1)
 
 
 async def ejecutar_agente(
@@ -193,18 +225,35 @@ async def ejecutar_agente(
     mapa_herramientas = {t.name: t for t in herramientas}
     llm_con_tools = llm_chat.bind_tools(herramientas)
 
+    palabras_codigo = (
+        "python", "sql", "bash", "java", "javascript", "html", "css", "c++",
+        "código", "codigo", "script", "función", "funcion", "algoritmo",
+        "programá", "programa", "programar", "debug", "depurar", "query", "consulta sql"
+    )
+    msg_lower = user_message.lower()
+    if any(p in msg_lower for p in palabras_codigo) and not any(x in msg_lower for x in ("historial", "conversaciones", "bitácora", "archivo", ".txt", ".csv")):
+        aviso = f"💻 Delegando tarea de código a {CODER_MODEL}..."
+        print(f"🤖 Agente invoca -> resolver_programacion_codigo({{'tarea_codigo': {user_message!r}}})")
+        await update.message.reply_text(aviso)
+        resultado_coder = await asyncio.to_thread(
+            mapa_herramientas["resolver_programacion_codigo"].invoke,
+            {"tarea_codigo": user_message}
+        )
+        return str(resultado_coder).strip(), archivos_generados
+
     archivos_cargados = [f for f in os.listdir(DOCS_DIR) if f.lower().endswith((".pdf", ".txt"))]
     lista_docs = ", ".join(archivos_cargados) if archivos_cargados else "ninguno"
 
     system_prompt = SystemMessage(content=(
-        f"Eres Arturito, un asistente con herramientas locales que responde en español a {first_name}.\n"
-        f"Archivos disponibles en tu memoria: [{lista_docs}].\n"
-        "REGLAS OBLIGATORIAS:\n"
-        "1. Si te preguntan qué documentos o archivos tienes cargados, responde directamente enumerando los nombres de la lista de arriba SIN usar herramientas.\n"
-        "2. Si te preguntan sobre el contenido, leyes, artículos o datos dentro de esos archivos, ejecuta 'buscar_en_documentos_rag'.\n"
-        "3. Si te piden recordar o buscar conversaciones anteriores, ejecuta 'buscar_historial_postgresql'.\n"
-        "4. Si te piden crear, exportar o descargar un archivo .txt o .csv, ejecuta 'generar_reporte_archivo'.\n"
-        "5. Solo responde sin usar herramientas si es un saludo o charla casual."
+        f"Eres Arturito, un agente orquestador en español para {first_name}.\n"
+        f"Archivos cargados en la base de conocimiento: [{lista_docs}].\n"
+        "REGLAS ESTRICTAS DE DELEGACIÓN:\n"
+        "- NO tienes permitido escribir código fuente por tu cuenta. Ante cualquier pedido de programación, scripts, funciones o SQL, DEBES invocar la herramienta de programación.\n"
+        "- NO tienes permitido responder sobre el contenido de los documentos por memoria propia. Ante cualquier pregunta sobre los archivos cargados, DEBES invocar la herramienta de búsqueda en documentos.\n"
+        "- Si te piden exportar o crear un archivo .txt o .csv, DEBES invocar la herramienta de generación de reportes.\n"
+        "- Si te piden recordar conversaciones anteriores, DEBES invocar la herramienta de historial.\n"
+        "- Solo responde directamente sin herramientas si te saludan o preguntan qué archivos hay cargados.\n"
+        "- Nunca menciones nombres de herramientas ni pidas al usuario que las ejecute."
     ))
 
     mensajes = [system_prompt, HumanMessage(content=user_message)]
@@ -222,6 +271,7 @@ async def ejecutar_agente(
             call_id = tool_call["id"]
 
             etiquetas = {
+                "resolver_programacion_codigo": f"💻 Delegando tarea de código a {CODER_MODEL}...",
                 "buscar_en_documentos_rag": "📚 Buscando en documentos RAG...",
                 "buscar_historial_postgresql": "🗄️ Consultando bitácora en PostgreSQL...",
                 "generar_reporte_archivo": "📝 Generando archivo de reporte..."
@@ -463,7 +513,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 if __name__ == "__main__":
-    print(f"✨ Bot Agente activado | Modelo: {MODEL_NAME} | RAG: {ENABLE_RAG} | Visión: {VISION_MODEL}")
+    print(f"✨ Bot Agente activado | Modelo: {MODEL_NAME} | Coder: {CODER_MODEL} | RAG: {ENABLE_RAG} | Visión: {VISION_MODEL}")
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(MessageHandler(filters.Document.PDF | filters.Document.TXT, handle_document))
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_photo))
