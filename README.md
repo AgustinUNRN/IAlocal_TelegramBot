@@ -23,7 +23,7 @@ A diferencia de un chatbot lineal, **Arturito** utiliza una arquitectura híbrid
 El entorno está orquestado con **Docker Compose** e integra tres servicios aislados en red interna (`ai_sandbox_net`):
 
 * **`telegram_bot` (`telegram_bot_sandbox`):** Aplicación en Python (`PYTHONUNBUFFERED=1`) que gestiona los handlers de Telegram, el bucle del agente LangChain, la ingesta de archivos, la exportación de reportes (persistidos en `./telegram-bot/reports`) y las conexiones con PostgreSQL y ChromaDB.
-* **`ollama-isolated` (`ollama_sandbox`):** Servidor local de Ollama endurecido (sin puertos expuestos al host, usuario no-root `10001:10001`, `cap_drop: ALL`, `no-new-privileges` y `OLLAMA_MAX_LOADED_MODELS=2`) que aloja los 5 modelos locales (`qwen2.5:3b`, `qwen2.5-coder:1.5b`, `moondream:1.8b`, `lauchacarro/qwen2.5-translator` y `nomic-embed-text`).
+* **`ollama-isolated` (`ollama_sandbox`):** Servidor local de Ollama endurecido (sin puertos expuestos al host, usuario no-root `10001:10001`, `cap_drop: ALL`, `no-new-privileges` y `OLLAMA_MAX_LOADED_MODELS=2`) que descarga al iniciar (`entrypoint.sh`) y aloja los 5 modelos locales (`qwen2.5:3b`, `qwen2.5-coder:1.5b`, `moondream:1.8b`, `lauchacarro/qwen2.5-translator` y `nomic-embed-text`).
 * **`postgres_db` (`postgres_db_sandbox`):** Base de datos PostgreSQL 15 para el registro y persistencia relacional de usuarios y mensajes.
 
 *(Para ver el árbol de directorios completo, consultá [`architecture.md`](./architecture.md)).*
@@ -89,7 +89,7 @@ Desde la raíz del proyecto (donde reside `docker-compose.yml`), ejecutar:
 docker compose up -d --build
 ```
 
-> **Nota:** La descarga inicial de los modelos ocurre automáticamente durante la compilación del servicio `ollama-isolated` utilizando las variables definidas en la raíz.
+> **Nota:** La descarga inicial de los modelos ocurre automáticamente al iniciar por primera vez el contenedor `ollama_sandbox` (mediante `entrypoint.sh`) utilizando las variables definidas en el `.env` de la raíz, y quedan persistidos en el volumen `ollama_isolated_data`. Podés seguir el progreso con `docker logs -f ollama_sandbox`.
 
 ### Verificación Manual de Modelos en Ollama (Opcional)
 
@@ -124,6 +124,10 @@ Existen dos formas de cargar documentos `.pdf` o `.txt` en la base vectorial Chr
   ```bash
   docker logs -f telegram_bot_sandbox
   ```
+* **Seguir logs de Ollama y descarga de modelos:**
+  ```bash
+  docker logs -f ollama_sandbox
+  ```
 * **Consultar historial de mensajes en PostgreSQL:**
   ```bash
   docker exec -it postgres_db_sandbox psql -U bot_user -d telegram_bot_db -c "
@@ -146,9 +150,9 @@ Existen dos formas de cargar documentos `.pdf` o `.txt` en la base vectorial Chr
   ```
 * **Cambiar el modelo principal de IA:**
   1. Modificar `MODEL_NAME=` en el archivo `.env` de la raíz por alguno descargado previamente en `ollama_sandbox`.
-  2. Recrear el contenedor del bot para tomar la nueva variable:
+  2. Recrear los servicios para aplicar la nueva variable:
      ```bash
-     docker compose up -d telegram_bot
+     docker compose up -d ollama-isolated telegram_bot
      ```
 * **Detener todos los servicios:**
   ```bash
