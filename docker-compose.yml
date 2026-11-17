@@ -18,13 +18,13 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        MODEL_NAME: ${MODEL_NAME:-qwen2.5:1.5b}
+        MODEL_NAME: ${MODEL_NAME:-qwen2.5:3b}
         EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nomic-embed-text}
     container_name: ollama_sandbox
     user: "10001:10001"
     restart: unless-stopped
     expose:
-      - "11434" # Solo visible para otros contenedores en la red ai_sandbox_net
+      - "11434"
     cap_drop:
       - ALL
     cap_add:
@@ -33,7 +33,7 @@ services:
       - no-new-privileges:true
     environment:
       - OLLAMA_NUM_PARALLEL=1
-      - OLLAMA_MAX_LOADED_MODELS=1
+      - OLLAMA_MAX_LOADED_MODELS=2
       - OLLAMA_DEBUG=1
     volumes:
       - ollama_isolated_data:/home/aiuser/.ollama
@@ -48,9 +48,9 @@ services:
     deploy:
       resources:
         limits:
-          memory: 12g                    # Límite máximo ampliado
+          memory: 12g
         reservations:
-          memory: 6g                     # RAM reservada garantizada
+          memory: 6g
 
   telegram_bot:
     build:
@@ -62,11 +62,13 @@ services:
       - .env
       - ./telegram-bot/.env
     environment:
+      - PYTHONUNBUFFERED=1
       - OLLAMA_HOST=http://ollama_sandbox:11434
       - CHROMA_DB_DIR=/app/chroma_db
     volumes:
       - ./telegram-bot/chroma_db:/app/chroma_db
-      - ./telegram-bot/docs:/app/docs  # Carpeta para colocar PDFs
+      - ./telegram-bot/docs:/app/docs
+      - ./telegram-bot/reports:/app/reports
     networks:
       - ai_sandbox_net
     depends_on:
