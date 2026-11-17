@@ -175,6 +175,52 @@ def construir_herramientas_usuario(user_id: int, archivos_generados: list[str]):
             return "\n".join(resultado)
         except Exception as e:
             return f"Error al consultar PostgreSQL: {e}"
+    @tool
+    def exportar_historial_postgresql(formato: str = "csv") -> str:
+        """Exporta el historial completo de conversaciones del usuario desde PostgreSQL directamente a un archivo descargable .csv o .txt."""
+        ext = "csv" if formato.lower().strip(".") == "csv" else "txt"
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        ruta_archivo = os.path.join(REPORTS_DIR, f"historial_chat_{timestamp}.{ext}")
+
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT fecha, mensaje_usuario, respuesta_bot
+                FROM mensajes
+                WHERE telegram_id = %s
+                ORDER BY fecha ASC;
+            """, (user_id,))
+            filas = cur.fetchall()
+            cur.close()
+            conn.close()
+
+            if not filas:
+                return "No hay mensajes registrados en PostgreSQL para exportar."
+
+            if ext == "csv":
+                with open(ruta_archivo, "w", newline="", encoding="utf-8") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["fecha", "mensaje_usuario", "respuesta_bot"])
+                    for fecha, msg_u, resp_b in filas:
+                        writer.writerow([
+                            fecha.strftime("%Y-%m-%d %H:%M:%S"),
+                            msg_u,
+                            resp_b
+                        ])
+            else:
+                with open(ruta_archivo, "w", encoding="utf-8") as f:
+                    f.write("=== HISTORIAL COMPLETO DE CONVERSACIONES ===\n\n")
+                    for fecha, msg_u, resp_b in filas:
+                        f.write(f"[{fecha.strftime('%d/%m/%Y %H:%M:%S')}]\n")
+                        f.write(f"Usuario: {msg_u}\n")
+                        f.write(f"Arturito: {resp_b}\n")
+                        f.write("-" * 50 + "\n")
+
+            archivos_generados.append(ruta_archivo)
+            return f"Historial exportado con {len(filas)} registros en '{os.path.basename(ruta_archivo)}'. Se adjuntará automáticamente."
+        except Exception as e:
+            return f"Error al exportar el historial: {e}"
 
     @tool
     def generar_reporte_archivo(titulo: str, contenido: str, formato: str = "txt") -> str:
@@ -205,6 +251,7 @@ def construir_herramientas_usuario(user_id: int, archivos_generados: list[str]):
         resolver_programacion_codigo,
         buscar_en_documentos_rag,
         buscar_historial_postgresql,
+        exportar_historial_postgresql,
         generar_reporte_archivo
     ]
 
@@ -251,6 +298,7 @@ async def ejecutar_agente(
         "- NO tienes permitido escribir código fuente por tu cuenta. Ante cualquier pedido de programación, scripts, funciones o SQL, DEBES invocar la herramienta de programación.\n"
         "- NO tienes permitido responder sobre el contenido de los documentos por memoria propia. Ante cualquier pregunta sobre los archivos cargados, DEBES invocar la herramienta de búsqueda en documentos.\n"
         "- Si te piden exportar o crear un archivo .txt o .csv, DEBES invocar la herramienta de generación de reportes.\n"
+        "- Si te piden exportar o descargar el historial de conversaciones, DEBES invocar la herramienta exportar_historial_postgresql.\n"
         "- Si te piden recordar conversaciones anteriores, DEBES invocar la herramienta de historial.\n"
         "- Solo responde directamente sin herramientas si te saludan o preguntan qué archivos hay cargados.\n"
         "- Nunca menciones nombres de herramientas ni pidas al usuario que las ejecute."
@@ -274,6 +322,7 @@ async def ejecutar_agente(
                 "resolver_programacion_codigo": f"💻 Delegando tarea de código a {CODER_MODEL}...",
                 "buscar_en_documentos_rag": "📚 Buscando en documentos RAG...",
                 "buscar_historial_postgresql": "🗄️ Consultando bitácora en PostgreSQL...",
+                "exportar_historial_postgresql": "🗄️ Exportando historial de PostgreSQL...",
                 "generar_reporte_archivo": "📝 Generando archivo de reporte..."
             }
             aviso = etiquetas.get(nombre_tool, f"⚙️ Ejecutando {nombre_tool}...")
