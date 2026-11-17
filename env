@@ -1,6 +1,7 @@
 # Configuración del modelo Ollama
-MODEL_NAME=qwen2.5:1.5b
+MODEL_NAME=qwen2.5:3b
 EMBEDDING_MODEL=nomic-embed-text
 OLLAMA_HOST=http://ollama_sandbox:11434
-VISION_MODEL=moondream:latest
+VISION_MODEL=moondream:1.8b
 TRANSLATOR_MODEL=lauchacarro/qwen2.5-translator
+CODER_MODEL=qwen2.5-coder:1.5b
