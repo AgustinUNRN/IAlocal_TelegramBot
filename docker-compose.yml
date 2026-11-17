@@ -17,12 +17,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      args:
-        MODEL_NAME: ${MODEL_NAME:-qwen2.5:3b}
-        EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nomic-embed-text}
     container_name: ollama_sandbox
     user: "10001:10001"
     restart: unless-stopped
+    env_file:
+      - .env
     expose:
       - "11434"
     cap_drop:
@@ -41,7 +40,7 @@ services:
       test: ["CMD-SHELL", "ollama list || exit 1"]
       interval: 5s
       timeout: 5s
-      retries: 10
+      retries: 15
       start_period: 10s
     networks:
       - ai_sandbox_net
